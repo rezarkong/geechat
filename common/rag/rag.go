@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	embeddingArk "github.com/cloudwego/eino-ext/components/embedding/ark"
 	redisIndexer "github.com/cloudwego/eino-ext/components/indexer/redis"
@@ -27,6 +28,37 @@ type RAGIndexer struct {
 type RAGQuery struct {
 	embedding embedding.Embedder
 	retriever retriever.Retriever
+}
+
+func splitText(text string, chunkSize, overlap int) []string {
+	if chunkSize <= 0 {
+		return nil
+	}
+	if overlap < 0 {
+		overlap = 0
+	}
+	if overlap >= chunkSize {
+		overlap = chunkSize / 5
+	}
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return nil
+	}
+	// 分块的切片
+	texts := make([]string, 0)
+	// 每块不重复的长度
+	step := chunkSize - overlap
+	for start := 0; start < len(runes); start += step {
+		end := start + chunkSize
+		if end > len(runes) {
+			end = len(runes)
+		}
+		texts = append(texts, string(runes[start:end]))
+		if end == len(runes) {
+			break
+		}
+	}
+	return texts
 }
 
 // 构建知识库索引
@@ -88,6 +120,24 @@ func NewRAGIndexer(filename, embeddingModel string) (*RAGIndexer, error) {
 			if s, ok := doc.MetaData["source"].(string); ok {
 				source = s
 			}
+			chunkIndex := 0
+			if v, ok := doc.MetaData["chunk_index"]; ok {
+				switch vv := v.(type) {
+				case int:
+					chunkIndex = vv
+				case int32:
+					chunkIndex = int(vv)
+				case int64:
+					chunkIndex = int(vv)
+				case float64:
+					chunkIndex = int(vv)
+				case string:
+					parsed, err := strconv.Atoi(vv)
+					if err == nil {
+						chunkIndex = parsed
+					}
+				}
+			}
 
 			// 构造 Redis 中实际存储的数据结构（Hash）
 			return &redisIndexer.Hashes{
@@ -101,8 +151,9 @@ func NewRAGIndexer(filename, embeddingModel string) (*RAGIndexer, error) {
 					// 生成的向量会存入名为 "vector" 的字段中
 					"content": {Value: doc.Content, EmbedKey: "vector"},
 
-					// metadata：一些辅助信息，不参与向量计算
-					"metadata": {Value: source},
+					// source / chunk_index：辅助定位原始文档块，不参与向量计算
+					"source":      {Value: source},
+					"chunk_index": {Value: chunkIndex},
 				},
 			}, nil
 		},
@@ -140,27 +191,47 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	}
 
 	// 将文件内容转换为文档
-	// TODO: 这里可以根据需要进行文本切块，目前简单处理为一个文档
-	doc := &schema.Document{
-		ID:      "doc_1", // 可以使用 UUID 或其他唯一标识
-		Content: string(content),
-		MetaData: map[string]any{
-			"source": filePath,
-		},
+	chunks := splitText(string(content), 1000, 200)
+	if len(chunks) == 0 {
+		return fmt.Errorf("empty file content")
 	}
-
+	docs := make([]*schema.Document, 0, len(chunks))
+	for i, chunk := range chunks {
+		docs = append(docs, &schema.Document{
+			ID:      fmt.Sprintf("doc_%d", i+1),
+			Content: chunk,
+			MetaData: map[string]any{
+				"source":      filePath,
+				"chunk_index": i + 1,
+			},
+		})
+	}
 	// 使用 indexer 存储文档（会自动进行向量化）
-	_, err = r.indexer.Store(ctx, []*schema.Document{doc})
+	_, err = r.indexer.Store(ctx, docs)
 	if err != nil {
 		return fmt.Errorf("failed to store document: %w", err)
 	}
-	redisKey := redis.GenerateIndexNamePrefix(filepath.Base(filePath)) + fmt.Sprintf("%s:%s", filepath.Base(filePath),
-		doc.ID)
-	vec, err := redisPkg.GetHashVector(ctx, redisKey)
-	if err != nil {
-		return fmt.Errorf("read vector from redis failed: %w", err)
+	for _, doc := range docs {
+		redisKey := redis.GenerateIndexNamePrefix(filepath.Base(filePath)) + fmt.Sprintf("%s:%s", filepath.Base(filePath), doc.ID)
+
+		vec, err := redisPkg.GetHashVector(ctx, redisKey)
+		if err != nil {
+			log.Printf("read vector failed, key=%s err=%v", redisKey, err)
+			continue
+		}
+		preview := vec
+		if len(preview) > 10 {
+			preview = preview[:10]
+		}
+
+		log.Printf(
+			"RAG chunk stored: id=%s key=%s dim=%d first10=%v",
+			doc.ID,
+			redisKey,
+			len(vec),
+			preview,
+		)
 	}
-	log.Printf("vector dim=%d, first10=%v", len(vec), vec[:min(10, len(vec))])
 	return nil
 }
 
@@ -216,7 +287,7 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 		Client:       rdb,
 		Index:        indexName,
 		Dialect:      2,
-		ReturnFields: []string{"content", "metadata", "distance"},
+		ReturnFields: []string{"content", "source", "chunk_index", "distance"},
 		TopK:         5,
 		VectorField:  "vector",
 		DocumentConverter: func(ctx context.Context, doc redisCli.Document) (*schema.Document, error) {
@@ -228,9 +299,37 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 			for field, val := range doc.Fields {
 				if field == "content" {
 					resp.Content = val
-				} else {
-					resp.MetaData[field] = val
+					continue
 				}
+				if field == "chunk_index" {
+					switch vv := val.(type) {
+					case int:
+						resp.MetaData[field] = vv
+						continue
+					case int32:
+						resp.MetaData[field] = int(vv)
+						continue
+					case int64:
+						resp.MetaData[field] = int(vv)
+						continue
+					case float64:
+						resp.MetaData[field] = int(vv)
+						continue
+					case string:
+						parsed, err := strconv.Atoi(vv)
+						if err == nil {
+							resp.MetaData[field] = parsed
+							continue
+						}
+					case []byte:
+						parsed, err := strconv.Atoi(string(vv))
+						if err == nil {
+							resp.MetaData[field] = parsed
+							continue
+						}
+					}
+				}
+				resp.MetaData[field] = val
 			}
 			return resp, nil
 		},
@@ -265,6 +364,12 @@ func BuildRAGPrompt(query string, docs []*schema.Document) string {
 
 	contextText := ""
 	for i, doc := range docs {
+		source, _ := doc.MetaData["source"].(string)
+		chunkIndex, ok := doc.MetaData["chunk_index"]
+		if source != "" || ok {
+			contextText += fmt.Sprintf("[文档 %d][source=%s][chunk=%v]: %s\n\n", i+1, source, chunkIndex, doc.Content)
+			continue
+		}
 		contextText += fmt.Sprintf("[文档 %d]: %s\n\n", i+1, doc.Content)
 	}
 

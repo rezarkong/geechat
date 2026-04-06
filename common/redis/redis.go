@@ -90,7 +90,8 @@ func InitRedisIndex(ctx context.Context, filename string, dimension int) error {
 		"PREFIX", "1", prefix,
 		"SCHEMA",
 		"content", "TEXT",
-		"metadata", "TEXT",
+		"source", "TEXT",
+		"chunk_index", "NUMERIC",
 		"vector", "VECTOR", "FLAT",
 		"6",
 		"TYPE", "FLOAT32",
@@ -111,7 +112,10 @@ func DeleteRedisIndex(ctx context.Context, filename string) error {
 	indexName := GenerateIndexName(filename)
 
 	// 删除索引
-	if err := Rdb.Do(ctx, "FT.DROPINDEX", indexName).Err(); err != nil {
+	if err := Rdb.Do(ctx, "FT.DROPINDEX", indexName, "DD").Err(); err != nil {
+		if strings.Contains(err.Error(), "Unknown index name") {
+			return nil
+		}
 		return fmt.Errorf("删除索引失败: %w", err)
 	}
 
