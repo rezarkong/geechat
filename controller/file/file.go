@@ -22,14 +22,14 @@ func UploadRagFile(c *gin.Context) {
 	uploadedFile, err := c.FormFile("file")
 	if err != nil {
 		log.Println("FormFile fail ", err)
-		c.JSON(http.StatusOK, res.CodeOf(code.CodeInvalidParams))
+		c.JSON(http.StatusBadRequest, res.CodeOf(code.CodeInvalidParams))
 		return
 	}
 
 	username := c.GetString("userName")
 	if username == "" {
 		log.Println("Username not found in context")
-		c.JSON(http.StatusOK, res.CodeOf(code.CodeInvalidToken))
+		c.JSON(http.StatusUnauthorized, res.CodeOf(code.CodeInvalidToken))
 		return
 	}
 
@@ -37,7 +37,7 @@ func UploadRagFile(c *gin.Context) {
 	filePath, err := file.UploadRagFile(username, uploadedFile)
 	if err != nil {
 		log.Println("UploadFile fail ", err)
-		c.JSON(http.StatusOK, res.CodeOf(code.CodeServerBusy))
+		c.JSON(http.StatusInternalServerError, res.CodeOf(code.CodeServerBusy))
 		return
 	}
 

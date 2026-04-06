@@ -1,6 +1,9 @@
 package rag
 
-import "testing"
+import (
+	"testing"
+	"unicode/utf8"
+)
 
 func TestSplitTextPreservesWhitespace(t *testing.T) {
 	text := "  abc\n"
@@ -27,6 +30,24 @@ func TestSplitTextHandlesOverlapEqualChunkSize(t *testing.T) {
 	for i := range expected {
 		if chunks[i] != expected[i] {
 			t.Fatalf("chunk %d: expected %q, got %q", i, expected[i], chunks[i])
+		}
+	}
+}
+
+func TestSplitTextUsesByteLimit(t *testing.T) {
+	text := "你好世界你好世界"
+
+	chunks := splitText(text, 7, 2)
+
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is not valid utf8: %q", i, chunk)
+		}
+		if len(chunk) > 7 {
+			t.Fatalf("chunk %d exceeds byte limit: %d", i, len(chunk))
 		}
 	}
 }

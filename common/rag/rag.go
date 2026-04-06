@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"unicode/utf8"
 
 	embeddingArk "github.com/cloudwego/eino-ext/components/embedding/ark"
 	redisIndexer "github.com/cloudwego/eino-ext/components/indexer/redis"
@@ -30,6 +31,12 @@ type RAGQuery struct {
 	retriever retriever.Retriever
 }
 
+const (
+	ragChunkBytes    = 3000
+	ragChunkOverlap  = 300
+	ragEmbedMaxBytes = 8192
+)
+
 func splitText(text string, chunkSize, overlap int) []string {
 	if chunkSize <= 0 {
 		return nil
@@ -40,23 +47,47 @@ func splitText(text string, chunkSize, overlap int) []string {
 	if overlap >= chunkSize {
 		overlap = chunkSize / 5
 	}
-	runes := []rune(text)
-	if len(runes) == 0 {
+	if text == "" {
 		return nil
 	}
-	// 分块的切片
+
 	texts := make([]string, 0)
-	// 每块不重复的长度
 	step := chunkSize - overlap
-	for start := 0; start < len(runes); start += step {
+
+	for start := 0; start < len(text); {
 		end := start + chunkSize
-		if end > len(runes) {
-			end = len(runes)
+		if end > len(text) {
+			end = len(text)
+		} else {
+			for end > start && !utf8.ValidString(text[start:end]) {
+				end--
+			}
+			if end == start {
+				end = start
+				_, size := utf8.DecodeRuneInString(text[start:])
+				if size <= 0 {
+					break
+				}
+				end += size
+			}
 		}
-		texts = append(texts, string(runes[start:end]))
-		if end == len(runes) {
+
+		texts = append(texts, text[start:end])
+		if end == len(text) {
 			break
 		}
+
+		nextStart := end - overlap
+		if nextStart <= start {
+			nextStart = start + step
+		}
+		if nextStart < 0 {
+			nextStart = 0
+		}
+		for nextStart < len(text) && !utf8.ValidString(text[nextStart:end]) {
+			nextStart++
+		}
+		start = nextStart
 	}
 	return texts
 }
@@ -110,7 +141,7 @@ func NewRAGIndexer(filename, embeddingModel string) (*RAGIndexer, error) {
 	indexerConfig := &redisIndexer.IndexerConfig{
 		Client:    rdb,                                     // Redis 客户端
 		KeyPrefix: redis.GenerateIndexNamePrefix(filename), // 不同知识库使用不同前缀，避免冲突
-		BatchSize: 10,                                      // 批量处理文档，提高写入效率
+		BatchSize: 1,                                       // Ark 对单次输入长度限制严格，这里逐条做 embedding
 
 		// 定义：一段文档（Document）在 Redis 中该如何存储
 		DocumentToHashes: func(ctx context.Context, doc *schema.Document) (*redisIndexer.Hashes, error) {
@@ -191,12 +222,15 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	}
 
 	// 将文件内容转换为文档
-	chunks := splitText(string(content), 1000, 200)
+	chunks := splitText(string(content), ragChunkBytes, ragChunkOverlap)
 	if len(chunks) == 0 {
 		return fmt.Errorf("empty file content")
 	}
 	docs := make([]*schema.Document, 0, len(chunks))
 	for i, chunk := range chunks {
+		if len(chunk) == 0 || len(chunk) > ragEmbedMaxBytes {
+			return fmt.Errorf("invalid chunk size: chunk=%d bytes=%d", i+1, len(chunk))
+		}
 		docs = append(docs, &schema.Document{
 			ID:      fmt.Sprintf("doc_%d", i+1),
 			Content: chunk,
@@ -206,6 +240,7 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 			},
 		})
 	}
+	log.Printf("RAG split file=%s size=%d bytes chunks=%d first_chunk_bytes=%d", filePath, len(content), len(docs), len(docs[0].Content))
 	// 使用 indexer 存储文档（会自动进行向量化）
 	_, err = r.indexer.Store(ctx, docs)
 	if err != nil {
@@ -302,31 +337,10 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 					continue
 				}
 				if field == "chunk_index" {
-					switch vv := val.(type) {
-					case int:
-						resp.MetaData[field] = vv
+					parsed, err := strconv.Atoi(val)
+					if err == nil {
+						resp.MetaData[field] = parsed
 						continue
-					case int32:
-						resp.MetaData[field] = int(vv)
-						continue
-					case int64:
-						resp.MetaData[field] = int(vv)
-						continue
-					case float64:
-						resp.MetaData[field] = int(vv)
-						continue
-					case string:
-						parsed, err := strconv.Atoi(vv)
-						if err == nil {
-							resp.MetaData[field] = parsed
-							continue
-						}
-					case []byte:
-						parsed, err := strconv.Atoi(string(vv))
-						if err == nil {
-							resp.MetaData[field] = parsed
-							continue
-						}
 					}
 				}
 				resp.MetaData[field] = val
