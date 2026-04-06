@@ -55,9 +55,7 @@ func CheckCaptchaForEmail(email, userInput string) (bool, error) {
 
 		// 验证成功后删除 key
 		if err := Rdb.Del(ctx, key).Err(); err != nil {
-
-		} else {
-
+			return true, err
 		}
 		return true, nil
 	}

@@ -6,7 +6,9 @@ import (
 	"GopherAI/config"
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 
 	embeddingArk "github.com/cloudwego/eino-ext/components/embedding/ark"
 	redisIndexer "github.com/cloudwego/eino-ext/components/indexer/redis"
@@ -152,7 +154,13 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to store document: %w", err)
 	}
-
+	redisKey := redis.GenerateIndexNamePrefix(filepath.Base(filePath)) + fmt.Sprintf("%s:%s", filepath.Base(filePath),
+		doc.ID)
+	vec, err := redisPkg.GetHashVector(ctx, redisKey)
+	if err != nil {
+		return fmt.Errorf("read vector from redis failed: %w", err)
+	}
+	log.Printf("vector dim=%d, first10=%v", len(vec), vec[:min(10, len(vec))])
 	return nil
 }
 

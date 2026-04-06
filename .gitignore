@@ -1,0 +1,6 @@
+uploads/*
+GopherAI
+config/config.toml
+*.log
+.idea/
+.codex
