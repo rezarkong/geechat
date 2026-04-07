@@ -15,6 +15,14 @@ type (
 		FilePath string `json:"file_path,omitempty"`
 		controller.Response
 	}
+
+	RagIndexStatusResponse struct {
+		IndexStatus string `json:"index_status"`
+		FilePath    string `json:"file_path,omitempty"`
+		IndexMsg    string `json:"index_msg,omitempty"`
+		UpdatedAt   int64  `json:"updated_at,omitempty"`
+		controller.Response
+	}
 )
 
 func UploadRagFile(c *gin.Context) {
@@ -44,5 +52,24 @@ func UploadRagFile(c *gin.Context) {
 
 	res.Success()
 	res.FilePath = filePath
+	c.JSON(http.StatusOK, res)
+}
+
+func GetRagIndexStatus(c *gin.Context) {
+	res := new(RagIndexStatusResponse)
+
+	username := c.GetString("userName")
+	if username == "" {
+		log.Println("Username not found in context")
+		c.JSON(http.StatusUnauthorized, res.CodeOf(code.CodeInvalidToken))
+		return
+	}
+
+	status := file.GetRagIndexStatus(username)
+	res.Success()
+	res.IndexStatus = status.Status
+	res.FilePath = status.FilePath
+	res.IndexMsg = status.Message
+	res.UpdatedAt = status.UpdatedAt
 	c.JSON(http.StatusOK, res)
 }

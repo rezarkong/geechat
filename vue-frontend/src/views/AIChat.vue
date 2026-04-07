@@ -520,6 +520,29 @@ export default {
       }
     }
 
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+    const pollRagIndexStatus = async () => {
+      for (let i = 0; i < 120; i++) {
+        const response = await api.get('/file/status')
+        if (!response.data || response.data.status_code !== 1000) {
+          throw new Error(response.data?.status_msg || '查询索引状态失败')
+        }
+
+        const status = response.data.index_status
+        if (status === 'success') {
+          return response.data
+        }
+        if (status === 'failed') {
+          throw new Error(response.data.index_msg || '文档索引失败')
+        }
+
+        await sleep(2000)
+      }
+
+      throw new Error('文档索引超时，请稍后再试')
+    }
+
     const handleFileUpload = async (event) => {
       const file = event.target.files[0]
       if (!file) return
@@ -547,13 +570,15 @@ export default {
         })
 
         if (response.data && response.data.status_code === 1000) {
-          ElMessage.success(`文件上传成功`)
+          ElMessage.success('文件上传成功，正在建立索引')
+          await pollRagIndexStatus()
+          ElMessage.success('文档索引完成')
         } else {
           ElMessage.error(response.data?.status_msg || '上传失败')
         }
       } catch (error) {
         console.error('File upload error:', error)
-        ElMessage.error('文件上传失败')
+        ElMessage.error(error.response?.data?.status_msg || error.message || '文件上传失败')
       } finally {
         uploading.value = false
         // 清空文件输入

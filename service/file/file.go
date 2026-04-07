@@ -10,7 +10,84 @@ import (
 	"mime/multipart"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
+
+const (
+	RagIndexStatusNone     = "none"
+	RagIndexStatusIndexing = "indexing"
+	RagIndexStatusSuccess  = "success"
+	RagIndexStatusFailed   = "failed"
+)
+
+type RagIndexStatus struct {
+	Status    string `json:"index_status"`
+	FilePath  string `json:"file_path,omitempty"`
+	Message   string `json:"index_msg,omitempty"`
+	UpdatedAt int64  `json:"updated_at,omitempty"`
+}
+
+var (
+	ragIndexStatusMu sync.RWMutex
+	ragIndexStatuses = map[string]RagIndexStatus{}
+)
+
+func GetRagIndexStatus(username string) RagIndexStatus {
+	ragIndexStatusMu.RLock()
+	defer ragIndexStatusMu.RUnlock()
+
+	status, ok := ragIndexStatuses[username]
+	if !ok {
+		return RagIndexStatus{Status: RagIndexStatusNone}
+	}
+	return status
+}
+
+func setRagIndexStatus(username string, status RagIndexStatus) {
+	status.UpdatedAt = time.Now().Unix()
+	ragIndexStatusMu.Lock()
+	defer ragIndexStatusMu.Unlock()
+	ragIndexStatuses[username] = status
+}
+
+func finishRagIndexStatus(username, filePath, status, message string) {
+	ragIndexStatusMu.Lock()
+	defer ragIndexStatusMu.Unlock()
+
+	current, ok := ragIndexStatuses[username]
+	if ok && current.FilePath != filePath {
+		return
+	}
+	ragIndexStatuses[username] = RagIndexStatus{
+		Status:    status,
+		FilePath:  filePath,
+		Message:   message,
+		UpdatedAt: time.Now().Unix(),
+	}
+}
+
+func indexRagFileAsync(username, filename, filePath string) {
+	ctx := context.Background()
+	indexer, err := rag.NewRAGIndexer(ctx, filename, config.GetConfig().RagModelConfig.RagEmbeddingModel)
+	if err != nil {
+		log.Printf("Failed to create RAG indexer: %v", err)
+		os.Remove(filePath)
+		finishRagIndexStatus(username, filePath, RagIndexStatusFailed, err.Error())
+		return
+	}
+
+	if err := indexer.IndexFile(ctx, filePath); err != nil {
+		log.Printf("Failed to index file: %v", err)
+		os.Remove(filePath)
+		rag.DeleteIndex(ctx, filename)
+		finishRagIndexStatus(username, filePath, RagIndexStatusFailed, err.Error())
+		return
+	}
+
+	log.Printf("File indexed successfully: %s", filename)
+	finishRagIndexStatus(username, filePath, RagIndexStatusSuccess, "")
+}
 
 // 上传rag相关文件（这里只允许文本文件）
 // 其实可以直接将其向量化进行保存，但这边依旧存储到服务器上以便后续可以在服务器上查看历史RAG文件
@@ -35,7 +112,7 @@ func UploadRagFile(ctx context.Context, username string, file *multipart.FileHea
 			if !f.IsDir() {
 				filename := f.Name()
 				// 删除该文件对应的 Redis 索引
-				if err := rag.DeleteIndex(context.Background(), filename); err != nil {
+				if err := rag.DeleteIndex(ctx, filename); err != nil {
 					log.Printf("Failed to delete index for %s: %v", filename, err)
 					// 继续执行，不因为索引删除失败而中断文件上传
 				}
@@ -78,24 +155,11 @@ func UploadRagFile(ctx context.Context, username string, file *multipart.FileHea
 
 	log.Printf("File uploaded successfully: %s", filePath)
 
-	// 创建 RAG 索引器并对文件进行向量化
-	indexer, err := rag.NewRAGIndexer(ctx, filename, config.GetConfig().RagModelConfig.RagEmbeddingModel)
-	if err != nil {
-		log.Printf("Failed to create RAG indexer: %v", err)
-		// 删除已上传的文件
-		os.Remove(filePath)
-		return "", err
-	}
+	setRagIndexStatus(username, RagIndexStatus{
+		Status:   RagIndexStatusIndexing,
+		FilePath: filePath,
+	})
+	go indexRagFileAsync(username, filename, filePath)
 
-	// 读取文件内容并创建向量索引
-	if err := indexer.IndexFile(ctx, filePath); err != nil {
-		log.Printf("Failed to index file: %v", err)
-		// 删除已上传的文件和索引
-		os.Remove(filePath)
-		rag.DeleteIndex(ctx, filename)
-		return "", err
-	}
-
-	log.Printf("File indexed successfully: %s", filename)
 	return filePath, nil
 }

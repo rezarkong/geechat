@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strconv"
+	"sync"
 	"unicode/utf8"
 
 	embeddingArk "github.com/cloudwego/eino-ext/components/embedding/ark"
@@ -32,10 +32,42 @@ type RAGQuery struct {
 }
 
 const (
-	ragChunkBytes    = 3000
-	ragChunkOverlap  = 300
-	ragEmbedMaxBytes = 8192
+	ragChunkBytes     = 3000
+	ragChunkOverlap   = 300
+	ragEmbedMaxBytes  = 8192
+	ragEmbedBatchSize = 2
 )
+
+var ragEmbedderCache sync.Map
+
+type ragEmbedderCacheKey struct {
+	baseURL string
+	apiKey  string
+	model   string
+}
+
+func getRAGEmbedder(ctx context.Context, baseURL, apiKey, model string) (*embeddingArk.Embedder, error) {
+	key := ragEmbedderCacheKey{
+		baseURL: baseURL,
+		apiKey:  apiKey,
+		model:   model,
+	}
+	if cached, ok := ragEmbedderCache.Load(key); ok {
+		return cached.(*embeddingArk.Embedder), nil
+	}
+
+	embedder, err := embeddingArk.NewEmbedder(ctx, &embeddingArk.EmbeddingConfig{
+		BaseURL: baseURL,
+		APIKey:  apiKey,
+		Model:   model,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	actual, _ := ragEmbedderCache.LoadOrStore(key, embedder)
+	return actual.(*embeddingArk.Embedder), nil
+}
 
 func splitText(text string, chunkSize, overlap int) []string {
 	if chunkSize <= 0 {
@@ -97,9 +129,6 @@ func splitText(text string, chunkSize, overlap int) []string {
 // 通俗理解：把“人能读的文档”，转换成“AI 能按语义搜索的格式”，并存起来
 func NewRAGIndexer(ctx context.Context, filename, embeddingModel string) (*RAGIndexer, error) {
 
-	// 用于控制整个初始化流程（超时 / 取消等），这里先用默认背景即可
-	//ctx := context.Background()
-
 	// 从环境变量中读取调用向量模型所需的 API Key
 	apiKey := os.Getenv("OPENAI_API_KEY")
 
@@ -107,18 +136,9 @@ func NewRAGIndexer(ctx context.Context, filename, embeddingModel string) (*RAGIn
 	// Redis 在创建向量索引时必须提前知道这个值
 	dimension := config.GetConfig().RagModelConfig.RagDimension
 
-	// 1. 配置并创建“向量生成器”（Embedding）
-	// 可以理解为：找一个“翻译官”，
-	// 专门负责把文本翻译成 AI 能理解的“向量表示”
-	embedConfig := &embeddingArk.EmbeddingConfig{
-		BaseURL: config.GetConfig().RagModelConfig.RagBaseUrl, // 向量模型服务地址
-		APIKey:  apiKey,                                       // 鉴权信息
-		Model:   embeddingModel,                               // 使用哪个向量模型
-	}
-
-	// 创建向量生成器实例
+	// 创建向量生成器实例，并按 baseURL/apiKey/model 复用
 	// 后续所有文本的“向量化”都会通过它完成
-	embedder, err := embeddingArk.NewEmbedder(ctx, embedConfig)
+	embedder, err := getRAGEmbedder(ctx, config.GetConfig().RagModelConfig.RagBaseUrl, apiKey, embeddingModel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedder: %w", err)
 	}
@@ -141,7 +161,7 @@ func NewRAGIndexer(ctx context.Context, filename, embeddingModel string) (*RAGIn
 	indexerConfig := &redisIndexer.IndexerConfig{
 		Client:    rdb,                                     // Redis 客户端
 		KeyPrefix: redis.GenerateIndexNamePrefix(filename), // 不同知识库使用不同前缀，避免冲突
-		BatchSize: 1,                                       // Ark 对单次输入长度限制严格，这里逐条做 embedding
+		BatchSize: ragEmbedBatchSize,                       // 每批最多 2 个 chunk，避免超过 Ark 的单次输入长度限制
 
 		// 定义：一段文档（Document）在 Redis 中该如何存储
 		DocumentToHashes: func(ctx context.Context, doc *schema.Document) (*redisIndexer.Hashes, error) {
@@ -246,27 +266,6 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to store document: %w", err)
 	}
-	for _, doc := range docs {
-		redisKey := redis.GenerateIndexNamePrefix(filepath.Base(filePath)) + fmt.Sprintf("%s:%s", filepath.Base(filePath), doc.ID)
-
-		vec, err := redisPkg.GetHashVector(ctx, redisKey)
-		if err != nil {
-			log.Printf("read vector failed, key=%s err=%v", redisKey, err)
-			continue
-		}
-		preview := vec
-		if len(preview) > 10 {
-			preview = preview[:10]
-		}
-
-		log.Printf(
-			"RAG chunk stored: id=%s key=%s dim=%d first10=%v",
-			doc.ID,
-			redisKey,
-			len(vec),
-			preview,
-		)
-	}
 	return nil
 }
 
@@ -283,13 +282,8 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 	cfg := config.GetConfig()
 	apiKey := os.Getenv("OPENAI_API_KEY")
 
-	// 创建 embedding 模型
-	embedConfig := &embeddingArk.EmbeddingConfig{
-		BaseURL: cfg.RagModelConfig.RagBaseUrl,
-		APIKey:  apiKey,
-		Model:   cfg.RagModelConfig.RagEmbeddingModel,
-	}
-	embedder, err := embeddingArk.NewEmbedder(ctx, embedConfig)
+	// 创建 embedding 模型，并按 baseURL/apiKey/model 复用
+	embedder, err := getRAGEmbedder(ctx, cfg.RagModelConfig.RagBaseUrl, apiKey, cfg.RagModelConfig.RagEmbeddingModel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedder: %w", err)
 	}
