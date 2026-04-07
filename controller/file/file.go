@@ -34,7 +34,8 @@ func UploadRagFile(c *gin.Context) {
 	}
 
 	//indexer 会在 service 层根据实际文件名创建
-	filePath, err := file.UploadRagFile(username, uploadedFile)
+	ctx := c.Request.Context()
+	filePath, err := file.UploadRagFile(ctx, username, uploadedFile)
 	if err != nil {
 		log.Println("UploadFile fail ", err)
 		c.JSON(http.StatusInternalServerError, res.CodeOf(code.CodeServerBusy))

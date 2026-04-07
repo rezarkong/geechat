@@ -14,7 +14,7 @@ import (
 
 // 上传rag相关文件（这里只允许文本文件）
 // 其实可以直接将其向量化进行保存，但这边依旧存储到服务器上以便后续可以在服务器上查看历史RAG文件
-func UploadRagFile(username string, file *multipart.FileHeader) (string, error) {
+func UploadRagFile(ctx context.Context, username string, file *multipart.FileHeader) (string, error) {
 	// 校验文件类型和文件名
 	if err := utils.ValidateFile(file); err != nil {
 		log.Printf("File validation failed: %v", err)
@@ -79,7 +79,7 @@ func UploadRagFile(username string, file *multipart.FileHeader) (string, error) 
 	log.Printf("File uploaded successfully: %s", filePath)
 
 	// 创建 RAG 索引器并对文件进行向量化
-	indexer, err := rag.NewRAGIndexer(filename, config.GetConfig().RagModelConfig.RagEmbeddingModel)
+	indexer, err := rag.NewRAGIndexer(ctx, filename, config.GetConfig().RagModelConfig.RagEmbeddingModel)
 	if err != nil {
 		log.Printf("Failed to create RAG indexer: %v", err)
 		// 删除已上传的文件
@@ -88,11 +88,11 @@ func UploadRagFile(username string, file *multipart.FileHeader) (string, error) 
 	}
 
 	// 读取文件内容并创建向量索引
-	if err := indexer.IndexFile(context.Background(), filePath); err != nil {
+	if err := indexer.IndexFile(ctx, filePath); err != nil {
 		log.Printf("Failed to index file: %v", err)
 		// 删除已上传的文件和索引
 		os.Remove(filePath)
-		rag.DeleteIndex(context.Background(), filename)
+		rag.DeleteIndex(ctx, filename)
 		return "", err
 	}
 

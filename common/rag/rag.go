@@ -95,10 +95,10 @@ func splitText(text string, chunkSize, overlap int) []string {
 // 构建知识库索引
 // 专业说法：文本解析、文本切块、向量化、存储向量
 // 通俗理解：把“人能读的文档”，转换成“AI 能按语义搜索的格式”，并存起来
-func NewRAGIndexer(filename, embeddingModel string) (*RAGIndexer, error) {
+func NewRAGIndexer(ctx context.Context, filename, embeddingModel string) (*RAGIndexer, error) {
 
 	// 用于控制整个初始化流程（超时 / 取消等），这里先用默认背景即可
-	ctx := context.Background()
+	//ctx := context.Background()
 
 	// 从环境变量中读取调用向量模型所需的 API Key
 	apiKey := os.Getenv("OPENAI_API_KEY")
