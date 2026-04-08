@@ -209,7 +209,6 @@ func NewRAGIndexer(ctx context.Context, filename, embeddingModel string) (*RAGIn
 			}, nil
 		},
 	}
-
 	// 将“向量生成器”交给索引器
 	// 这样索引器在写入文本时，可以自动完成向量计算
 	indexerConfig.Embedding = embedder
@@ -266,6 +265,25 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to store document: %w", err)
 	}
+	//prefix := redis.GenerateIndexNamePrefix(filepath.Base(filePath))
+	//iter := redisPkg.Rdb.Scan(ctx, 0, prefix+"*", 10).Iterator()
+	//for iter.Next(ctx) {
+	//	key := iter.Val()
+	//	vec, err := redisPkg.GetHashVector(ctx, key)
+	//	if err != nil {
+	//		log.Printf("read vector failed, key=%s err=%v", key, err)
+	//		continue
+	//	}
+	//	show := 8
+	//	if len(vec) < show {
+	//		show = len(vec)
+	//	}
+	//	log.Printf("RAG vector key=%s dim=%d first=%v", key, len(vec), vec[:show])
+	//	break
+	//}
+	//if err := iter.Err(); err != nil {
+	//	log.Printf("scan vector keys failed: %v", err)
+	//}
 	return nil
 }
 
@@ -343,7 +361,6 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 		},
 	}
 	retrieverConfig.Embedding = embedder
-
 	rtr, err := redisRetriever.NewRetriever(ctx, retrieverConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create retriever: %w", err)
