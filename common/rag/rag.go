@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -32,10 +33,11 @@ type RAGQuery struct {
 }
 
 const (
-	ragChunkBytes     = 3000
-	ragChunkOverlap   = 300
-	ragEmbedMaxBytes  = 8192
-	ragEmbedBatchSize = 2
+	ragChunkBytes            = 3000
+	ragChunkOverlap          = 300
+	ragChunkOverlapSentences = 1
+	ragEmbedMaxBytes         = 8192
+	ragEmbedBatchSize        = 2
 )
 
 var ragEmbedderCache sync.Map
@@ -69,23 +71,37 @@ func getRAGEmbedder(ctx context.Context, baseURL, apiKey, model string) (*embedd
 	return actual.(*embeddingArk.Embedder), nil
 }
 
-func splitText(text string, chunkSize, overlap int) []string {
-	if chunkSize <= 0 {
-		return nil
+// 语句分割
+func splitSentence(text string) []string {
+	isEnd := func(r rune) bool {
+		switch r {
+		case '。', '！', '？', '；', '.', '!', '?', ';', '\n':
+			return true
+		default:
+			return false
+		}
 	}
-	if overlap < 0 {
-		overlap = 0
+	sentences := make([]string, 0)
+	var buf strings.Builder
+	for _, r := range text {
+		buf.WriteRune(r)
+		if isEnd(r) {
+			s := strings.TrimSpace(buf.String())
+			if s != "" {
+				sentences = append(sentences, s)
+			}
+			buf.Reset()
+		}
 	}
-	if overlap >= chunkSize {
-		overlap = chunkSize / 5
+	if tail := strings.TrimSpace(buf.String()); tail != "" {
+		sentences = append(sentences, tail)
 	}
-	if text == "" {
-		return nil
-	}
+	return sentences
+}
 
-	texts := make([]string, 0)
-	step := chunkSize - overlap
-
+// 万一是一个没有标点符号的超长文本
+func fallbackByteSplit(text string, chunkSize int) []string {
+	var chunks []string
 	for start := 0; start < len(text); {
 		end := start + chunkSize
 		if end > len(text) {
@@ -94,34 +110,66 @@ func splitText(text string, chunkSize, overlap int) []string {
 			for end > start && !utf8.ValidString(text[start:end]) {
 				end--
 			}
-			if end == start {
-				end = start
-				_, size := utf8.DecodeRuneInString(text[start:])
-				if size <= 0 {
-					break
-				}
-				end += size
-			}
 		}
+		chunks = append(chunks, text[start:end])
+		start = end
+	}
+	return chunks
+}
+func splitText(text string, chunkSize, overlap int) []string {
+	if chunkSize <= 0 || text == "" {
+		return nil
+	}
+	if overlap < 0 {
+		overlap = 0
+	}
+	if overlap >= chunkSize {
+		overlap = chunkSize / 5
+	}
 
-		texts = append(texts, text[start:end])
-		if end == len(text) {
+	sentences := splitSentence(text)
+	if len(sentences) == 0 {
+		return nil
+	} else if len(sentences) == 1 {
+
+	}
+	chunks := make([]string, 0)
+	for start := 0; start < len(sentences); {
+		var current strings.Builder
+		end := start
+		// 写入足量的 sentences
+		for end < len(sentences) {
+			next := sentences[end]
+			if current.Len() > 0 && current.Len()+len(next) > chunkSize {
+				break
+			}
+			current.WriteString(next)
+			end++
+		}
+		if current.Len() == 0 {
+			// 单句超过 chunkSize，兜底切分，避免死循环
+			longSentence := sentences[start]
+			if len(longSentence) > chunkSize {
+				chunks = append(chunks, fallbackByteSplit(longSentence, chunkSize)...)
+			} else {
+				chunks = append(chunks, longSentence)
+			}
+			start++
+			continue
+		}
+		chunks = append(chunks, current.String())
+
+		if end >= len(sentences) {
 			break
 		}
 
-		nextStart := end - overlap
+		nextStart := end - ragChunkOverlapSentences
 		if nextStart <= start {
-			nextStart = start + step
-		}
-		if nextStart < 0 {
-			nextStart = 0
-		}
-		for nextStart < len(text) && !utf8.ValidString(text[nextStart:end]) {
-			nextStart++
+			nextStart = end
 		}
 		start = nextStart
 	}
-	return texts
+	return chunks
 }
 
 // 构建知识库索引
